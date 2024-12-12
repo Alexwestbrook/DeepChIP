@@ -369,7 +369,7 @@ def process_fastq_and_save(
             * 2
         )
         split_sizes = tuple(int(n_reads * s) for s in split_sizes)
-        msg += f"Using split sizes of {split_sizes}"
+        msg = f"Using split sizes of {split_sizes}"
         if log_file:
             with open(log_file, "a") as f:
                 f.write(f"{msg}\n")
