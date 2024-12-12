@@ -143,12 +143,19 @@ def count_lines(filename):
     if platform.system() == "Linux":
         if filename.endswith(".gz"):
             zcat = subprocess.Popen(["zcat", filename], stdout=subprocess.PIPE)
-            wc = subprocess.Popen(["wc", "-l"], stdin=zcat.stdout)
+            wc = subprocess.Popen(
+                ["wc", "-l"], stdin=zcat.stdout, stdout=subprocess.PIPE
+            )
             zcat.stdout.close()
-            return wc.communicate()[0]
+            return int(wc.communicate()[0].partition(b"\n")[0])
         else:
-            return subprocess.run(["wc", "-l", filename])
+            return int(
+                subprocess.run(
+                    ["wc", "-l", filename], capture_output=True
+                ).stdout.partition(b" ")[0]
+            )
     else:
+        # from https://gist.github.com/zed/0ac760859e614cd03652
         if filename.endswith(".gz"):
             f = gzip.open(filename, "rt")
         else:
