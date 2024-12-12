@@ -483,8 +483,8 @@ def main(args: argparse.Namespace) -> None:
             optimizer.zero_grad()
             train_loss += loss.item()
 
-            if batch % 50 == 0:  # Show progress
-                loss, current = loss.item(), (batch + 1) * len(y)
+            if step % 50 == 0:  # Show progress
+                loss, current = loss.item(), (step + 1) * len(y)
                 print(
                     f"loss: {loss:>7f}  [{current:>5d}/{last_val_step*len(y)+size:>5d}]"
                 )

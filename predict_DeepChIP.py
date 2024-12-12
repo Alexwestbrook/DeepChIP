@@ -46,21 +46,21 @@ def parsing() -> argparse.Namespace:
     parser.add_argument(
         "-d",
         "--dataset_dir",
-        help="Directory of the dataset to use for training",
+        help="Directory of the dataset to use for training (default: %(default)s)",
         type=str,
         default=config["dataset_dir"] if config else None,
     )
     parser.add_argument(
         "-o",
         "--output_dir",
-        help="Output directory name. Must not already exist",
+        help="Output directory name. Must not already exist (default: %(default)s)",
         type=str,
         default=config["output_dir"] if config else None,
     )
     parser.add_argument(
         "-sp",
         "--split",
-        help="Dataset split to predict on",
+        help="Dataset split to predict on (default: %(default)s)",
         nargs="+",
         default=["train", "valid", "test"],
         type=str,
@@ -68,20 +68,20 @@ def parsing() -> argparse.Namespace:
     parser.add_argument(
         "-arch",
         "--architecture",
-        help="Name of the model architecture",
+        help="Name of the model architecture (default: %(default)s)",
         type=str,
         default=config["architecture"] if config else None,
     )
     parser.add_argument(
         "-m",
         "--model_state",
-        help="pytorch file with model state",
+        help="pytorch file with model state (default: %(default)s)",
         type=str,
         default=str(Path(config["output_dir"], "model_state.pt")) if config else None,
     )
     parser.add_argument(
         "--paired",
-        help="Indicates that dataset consists of paired reads",
+        help="Indicates that dataset consists of paired reads (default: %(default)s)",
         action="store_true",
         default=config["paired"] if config else False,
     )

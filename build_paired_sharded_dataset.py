@@ -17,7 +17,9 @@ import argparse
 import datetime
 import gzip
 import json
+import platform
 import socket
+import subprocess
 from itertools import repeat
 from pathlib import Path
 
@@ -65,16 +67,16 @@ def parsing():
         "-split",
         "--split_sizes",
         help="numbers of reads to put in the test and valid sets, "
-        "must be of length 2, set to 0 to ignore a split, default to "
-        "2**22 each.",
+        "set to 0 to ignore a split. If they sum to less than 1, "
+        "they are considered as fractions of available reads (default: %(default)s)",
         default=[2**23, 2**23],
-        type=int,
-        nargs="+",
+        type=float,
+        nargs=2,
     )
     parser.add_argument(
         "-shard",
         "--shard_size",
-        help="maximum number of reads in a shard, default to 2**24.",
+        help="maximum number of reads in a shard (default: %(default)s)",
         default=2**24,
         type=int,
     )
@@ -119,8 +121,8 @@ def parse_fastq(filename, discardN=False, read_length=None):
     def skip(read):
         """Function defining whether a read should be skipped"""
         return discardN and (
-            "N" in read.seq
-            or (read_length is not None and len(read.seq) != read_length)
+            "N" in read.seq[: len(read) if read_length is None else read_length]
+            or (read_length is not None and len(read.seq) < read_length)
         )
 
     # Use SeqIO to parse fastq, optionally reading from gzip file
@@ -135,6 +137,30 @@ def parse_fastq(filename, discardN=False, read_length=None):
             if skip(read):
                 continue
             yield read
+
+
+def count_lines(filename):
+    if platform.system() == "Linux":
+        if filename.endswith(".gz"):
+            zcat = subprocess.Popen(["zcat", filename], stdout=subprocess.PIPE)
+            wc = subprocess.Popen(["wc", "-l"], stdin=zcat.stdout)
+            zcat.stdout.close()
+            return wc.communicate()[0]
+        else:
+            return subprocess.run(["wc", "-l", filename])
+    else:
+        if filename.endswith(".gz"):
+            f = gzip.open(filename, "rt")
+        else:
+            f = open(filename)
+        lines = 0
+        buf_size = 1024 * 1024
+        read_f = f.read  # loop optimization
+        buf = read_f(buf_size)
+        while buf:
+            lines += buf.count("\n")
+            buf = read_f(buf_size)
+        return lines
 
 
 def parse_paired_fastq(filenames, discardN=False, read_length=None):
@@ -155,15 +181,15 @@ def parse_paired_fastq(filenames, discardN=False, read_length=None):
 
     Yields
     ------
-    read : Bio.Seq.SeqRecord
+    read1, read2 : Bio.Seq.SeqRecord
         Successive read records in fastq
     """
 
     def skip(read):
         """Function defining whether a read should be skipped"""
         return discardN and (
-            "N" in read.seq
-            or (read_length is not None and len(read.seq) != read_length)
+            "N" in read.seq[: len(read) if read_length is None else read_length]
+            or (read_length is not None and len(read.seq) < read_length)
         )
 
     # Parse both files simultaneously
@@ -173,6 +199,39 @@ def parse_paired_fastq(filenames, discardN=False, read_length=None):
         if skip(read1) or skip(read2):
             continue
         yield read1, read2
+
+
+def infer_readlen_and_fullprop(file_pair, discardN=False, n_seq=1000, readlen=None):
+    maxlen = 0
+    n_max = 0
+    if readlen is not None:
+        n_rl = 0
+    for i, reads in enumerate(zip(*(parse_fastq(file) for file in file_pair))):
+        if i >= n_seq:
+            break
+        maxlen_here = max(len(read.seq) for read in reads)
+        # count max length reads without Ns
+        ismax_here = all(
+            len(read.seq) == maxlen and "N" not in read.seq for read in reads
+        )
+        if maxlen_here > maxlen:
+            maxlen = maxlen_here
+            n_max = 1 if ismax_here else 0
+        elif ismax_here:
+            n_max += 1
+        if readlen is not None:
+            # Count more than read_length reads without Ns until read_length
+            if all(
+                len(read.seq) >= readlen and "N" not in read.seq[:readlen]
+                for read in reads
+            ):
+                n_rl += 1
+    maxprop = n_max / (4 * i)
+    if readlen is not None:
+        rlprop = n_rl / (4 * i)
+        return maxlen, maxprop, rlprop
+    else:
+        return maxlen, maxprop
 
 
 def process_fastq_and_save(
@@ -207,6 +266,8 @@ def process_fastq_and_save(
     split_sizes : tuple[int], default=[2**23, 2**23]
         Number of test and valid samples in this order, remaining samples are
         train samples. Set value to 0 to ignore a split.
+        If split_sizes sum to less than 1, they are assumed to be fractions
+        of the available reads.
     read_length : int, default=None
         Number of bases in reads, if None, the read length is inferred from
         the maximum length in the first 100 sequences from each file. All
@@ -247,25 +308,65 @@ def process_fastq_and_save(
     # Build output directory if needed
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # Infer read length from first 300 sequences in each file
+    # Infer read length and proportion of reads with Ns from first 1000 sequences in each file
     if read_length is None:
+        msg = "read length is unspecified, inferring read length from files"
         if log_file:
             with open(log_file, "a") as f:
-                f.write(
-                    "read length is unspecified, inferring read length from files\n"
-                )
-        print("read length is unspecified, inferring read length from files")
-        read_length = 0
-        for i, reads in enumerate(
-            zip(*(parse_fastq(file) for file in ip_file_pair + ctrl_file_pair))
-        ):
-            if i > 100:
-                break
-            read_length = max(read_length, max(len(read.seq) for read in reads))
+                f.write(f"{msg}\n")
+        print(msg)
+    maxlens = []
+    maxprops = []
+    if read_length is not None:
+        rlprops = []
+    for file_pair in (ip_file_pair, ctrl_file_pair):
+        if read_length is None:
+            maxlen, maxprop = infer_readlen_and_fullprop(file_pair, readlen=read_length)
+        else:
+            maxlen, maxprop, rlprop = infer_readlen_and_fullprop(
+                file_pair, readlen=read_length
+            )
+            rlprops.append(rlprop)
+        maxlens.append(maxlen)
+        maxprops.append(maxprop)
+        if read_length is not None and maxlen != read_length:
+            msg = f"Warning: max length seems to be {maxlen} in {file_pair} but user specified {read_length}"
+            msg += f"\nAbout {maxprop*100}% of read pairs are of max length without Ns"
+            msg += f"\nAbout {rlprop*100}% of read pairs are of user specified length or higher, without Ns"
+        else:
+            msg = f"Max length seems to be {maxlen} in {file_pair}"
+            msg += f"\nAbout {maxprop*100}% of read pairs are of max length without Ns"
         if log_file:
             with open(log_file, "a") as f:
-                f.write(f"read length is {read_length}\n")
-        print(f"read length is {read_length}")
+                f.write(f"{msg}\n")
+        print(msg)
+    if read_length is None:
+        read_length = max(maxlens)
+        rlprops = maxprops
+    msg = f"Using read_length {read_length}"
+    if log_file:
+        with open(log_file, "a") as f:
+            f.write(f"{msg}\n")
+    print(msg)
+
+    # Convert split_sizes from fractions to count
+    if 0 < sum(split_sizes) < 1:
+        if not discardN:
+            rlprops = (1, 1)
+        # Count reads
+        n_reads = (
+            min(
+                (count_lines(ip_file_pair[0]) // 4) * rlprops[0],
+                (count_lines(ctrl_file_pair[0]) // 4) * rlprops[1],
+            )
+            * 2
+        )
+        split_sizes = tuple(int(n_reads * s) for s in split_sizes)
+        msg += f"Using split sizes of {split_sizes}"
+        if log_file:
+            with open(log_file, "a") as f:
+                f.write(f"{msg}\n")
+        print(msg)
 
     # Handle train-valid-test splits
     splits = zip(["test", "valid", "train"], get_split_iterators())
